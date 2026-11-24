@@ -3,33 +3,30 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/Chadi00/tinyq/internal/queue"
 )
 
 func (s *Server) enqueue(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-
-	payload, err := io.ReadAll(r.Body)
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
-			return
-		}
+	id, err := s.q.EnqueueFrom(r.Body, r.ContentLength)
+	var status int
+	switch err {
+	case nil:
+		writeJSON(w, http.StatusCreated, struct {
+			ID uint64 `json:"id"`
+		}{id})
+		return
+	case queue.ErrFull:
+		status = http.StatusServiceUnavailable
+	case queue.ErrPayloadTooLarge:
+		status = http.StatusRequestEntityTooLarge
+	default:
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
 	}
-
-	id, err := s.q.Enqueue(payload)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]uint64{"id": id})
+	w.Header().Set("Connection", "close")
+	http.Error(w, err.Error(), status)
 }
 
 func (s *Server) lease(w http.ResponseWriter, r *http.Request) {

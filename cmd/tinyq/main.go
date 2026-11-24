@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -23,14 +25,24 @@ func main() {
 
 func run() error {
 	addr := flag.String("addr", ":8080", "Listen address")
+	queueMiB, ok := os.LookupEnv("TINYQ_MAX_QUEUE_MIB")
+	if !ok {
+		queueMiB = strconv.Itoa(queue.DefaultMaxMiB)
+	}
+	maxQueueMiB := flag.String("max-queue-mib", queueMiB, "Maximum unfinished payload and upload reservations in MiB (env: TINYQ_MAX_QUEUE_MIB)")
 	flag.Parse()
+	mib, err := strconv.Atoi(*maxQueueMiB)
+	if err != nil || mib <= 0 || mib > math.MaxInt>>20 {
+		return errors.New("-max-queue-mib or TINYQ_MAX_QUEUE_MIB must be a positive MiB integer that fits in an int after conversion to bytes")
+	}
 
-	q := queue.New()
+	q := queue.NewWithLimit(mib << 20)
 
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           server.New(q),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(

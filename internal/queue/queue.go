@@ -5,67 +5,136 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"io"
 	"sync"
 	"time"
 )
 
-
-var (
-ErrEmptyQueue = errors.New("queue is empty")
-ErrInvalidLease = errors.New("invalid lease")
-ErrExpiredLease = errors.New("lease has expired")
+const (
+	DefaultMaxMiB = 64
+	maxJobs       = 64 << 10
+	maxJobBytes   = 1 << 20
 )
 
-type Queue struct{
-	mu sync.Mutex
-	pending []*Job
-	leased map[uint64]Lease
-	nextID uint64
-	completed int
+var (
+	ErrEmptyQueue      = errors.New("queue is empty")
+	ErrInvalidLease    = errors.New("invalid lease")
+	ErrExpiredLease    = errors.New("lease has expired")
+	ErrFull            = errors.New("queue is full")
+	ErrPayloadTooLarge = errors.New("payload too large")
+)
+
+type Queue struct {
+	mu           sync.Mutex
+	pending      []*Job
+	leased       map[uint64]Lease
+	nextID       uint64
+	completed    int
 	leaseExpired int
+	maxBytes     int
+	payloadBytes int
+	outstanding  int
 }
 
-type Stats struct{
-	Pending int
-	Leased int
-	Completed int
+type Stats struct {
+	Pending          int
+	Leased           int
+	Completed        int
 	LeaseExpirations int
 }
 
 func New() *Queue {
+	return NewWithLimit(DefaultMaxMiB << 20)
+}
+
+func NewWithLimit(maxBytes int) *Queue {
 	return &Queue{
-		leased: make(map[uint64]Lease),
+		leased:   make(map[uint64]Lease),
+		maxBytes: maxBytes,
 	}
 }
 
 func (q *Queue) Enqueue(payload []byte) (uint64, error) {
+	if len(payload) > maxJobBytes {
+		return 0, ErrPayloadTooLarge
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if _, ok := q.reserve(len(payload)); !ok {
+		return 0, ErrFull
+	}
+	return q.enqueue(bytes.Clone(payload)), nil
+}
 
-	q.nextID++
-
-	job := &Job{
-		ID: q.nextID,
-		Payload: bytes.Clone(payload),
+func (q *Queue) EnqueueFrom(r io.Reader, contentLength int64) (uint64, error) {
+	if contentLength > maxJobBytes {
+		return 0, ErrPayloadTooLarge
 	}
 
-	q.pending = append(q.pending, job)
+	q.mu.Lock()
+	limit, ok := q.reserve(int(contentLength))
+	q.mu.Unlock()
+	if !ok {
+		return 0, ErrFull
+	}
 
-	return job.ID, nil
+	var payload []byte
+	var err error
+	if contentLength >= 0 {
+		payload = make([]byte, limit)
+		_, err = io.ReadFull(r, payload)
+	} else {
+		payload, err = io.ReadAll(io.LimitReader(r, int64(limit)+1))
+		if err == nil && len(payload) > limit {
+			err = ErrFull
+			if limit == maxJobBytes {
+				err = ErrPayloadTooLarge
+			}
+		} else if err == nil && cap(payload) != len(payload) {
+			payload = bytes.Clone(payload)
+		}
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if err != nil {
+		q.payloadBytes -= limit
+		q.outstanding--
+		return 0, err
+	}
+	q.payloadBytes -= limit - len(payload)
+	return q.enqueue(payload), nil
+}
+
+func (q *Queue) reserve(size int) (int, bool) {
+	available := q.maxBytes - q.payloadBytes
+	if size < 0 {
+		size = min(maxJobBytes, available)
+	}
+	if size > available || q.outstanding >= maxJobs {
+		return 0, false
+	}
+	q.payloadBytes += size
+	q.outstanding++
+	return size, true
+}
+
+func (q *Queue) enqueue(payload []byte) uint64 {
+	q.nextID++
+	q.pending = append(q.pending, &Job{ID: q.nextID, Payload: payload})
+	return q.nextID
 }
 
 func (q *Queue) Lease() (Lease, error) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 
 	if len(q.pending) == 0 {
+		q.mu.Unlock()
 		return Lease{}, ErrEmptyQueue
 	}
 
 	var token [16]byte
-	if _, err := rand.Read(token[:]); err != nil {
-		return Lease{}, err
-	}
+	rand.Read(token[:])
 
 	job := q.pending[0]
 
@@ -73,15 +142,16 @@ func (q *Queue) Lease() (Lease, error) {
 	q.pending = q.pending[1:]
 
 	lease := Lease{
-		Job: job,
-		Token: hex.EncodeToString(token[:]),
+		Job:       job,
+		Token:     hex.EncodeToString(token[:]),
 		ExpiresAt: time.Now().Add(leaseTTL),
 	}
 
 	q.leased[job.ID] = lease
+	q.mu.Unlock()
 
 	lease.Job = &Job{
-		ID: job.ID,
+		ID:      job.ID,
 		Payload: bytes.Clone(job.Payload),
 	}
 
@@ -89,25 +159,25 @@ func (q *Queue) Lease() (Lease, error) {
 }
 
 func (q *Queue) Renew(id uint64, token string) error {
-    q.mu.Lock()
-    defer q.mu.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
 
-    lease, ok := q.leased[id]
+	lease, ok := q.leased[id]
 
-    if !ok || lease.Token != token {
-        return ErrInvalidLease
-    }
+	if !ok || lease.Token != token {
+		return ErrInvalidLease
+	}
 
-    now := time.Now()
+	now := time.Now()
 
-    if !now.Before(lease.ExpiresAt) {
-        return ErrExpiredLease
-    }
+	if !now.Before(lease.ExpiresAt) {
+		return ErrExpiredLease
+	}
 
-    lease.ExpiresAt = now.Add(leaseTTL)
-    q.leased[id] = lease
+	lease.ExpiresAt = now.Add(leaseTTL)
+	q.leased[id] = lease
 
-    return nil
+	return nil
 }
 
 func (q *Queue) Ack(id uint64, token string) error {
@@ -125,6 +195,8 @@ func (q *Queue) Ack(id uint64, token string) error {
 	}
 
 	delete(q.leased, id)
+	q.payloadBytes -= len(lease.Job.Payload)
+	q.outstanding--
 	q.completed++
 
 	return nil
@@ -150,9 +222,9 @@ func (q *Queue) Stats() Stats {
 	defer q.mu.Unlock()
 
 	return Stats{
-		Pending: len(q.pending),
-		Leased: len(q.leased),
-		Completed: q.completed,
+		Pending:          len(q.pending),
+		Leased:           len(q.leased),
+		Completed:        q.completed,
 		LeaseExpirations: q.leaseExpired,
 	}
 }
