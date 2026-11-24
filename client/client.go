@@ -3,11 +3,13 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -140,9 +142,36 @@ func (c *Client) request(
 	}
 
 	if result != nil {
+		if path == "/lease" {
+			if hint := res.Header.Get("X-Tinyq-Payload-Size"); hint != "" {
+				return decodeLease(res.Body, hint, result)
+			}
+		}
 		return json.NewDecoder(res.Body).Decode(result)
 	}
 
 	_, err = io.Copy(io.Discard, res.Body)
 	return err
+}
+
+func decodeLease(r io.Reader, hint string, result any) error {
+	size, err := strconv.Atoi(hint)
+	if err != nil || size < 8<<10 || size > 1<<20 {
+		return json.NewDecoder(r).Decode(result)
+	}
+
+	data := make([]byte, base64.StdEncoding.EncodedLen(size)+256)
+	n, err := io.ReadFull(r, data)
+	switch err {
+	case nil:
+		return json.NewDecoder(io.MultiReader(bytes.NewReader(data), r)).Decode(result)
+	case io.EOF, io.ErrUnexpectedEOF:
+		data = data[:n]
+		if err := json.Unmarshal(data, result); err == nil {
+			return nil
+		}
+		return json.NewDecoder(bytes.NewReader(data)).Decode(result)
+	default:
+		return err
+	}
 }

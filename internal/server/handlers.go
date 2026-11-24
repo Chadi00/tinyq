@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/Chadi00/tinyq/internal/queue"
 )
@@ -42,7 +43,12 @@ func (s *Server) lease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, lease)
+	w.Header().Set("Content-Type", "application/json")
+	if size := lease.Job.PayloadSize(); size >= 8<<10 {
+		w.Header().Set("X-Tinyq-Payload-Size", strconv.Itoa(size))
+	}
+	w.WriteHeader(http.StatusOK)
+	lease.EncodeJSON(w)
 }
 
 func (s *Server) renew(w http.ResponseWriter, r *http.Request) {

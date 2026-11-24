@@ -18,7 +18,15 @@ var (
 
 type Job struct {
 	ID      uint64
-	Payload []byte
+	payload []byte
+}
+
+func (j Job) Payload() []byte {
+	return bytes.Clone(j.payload)
+}
+
+func (j Job) PayloadSize() int {
+	return len(j.payload)
 }
 
 func (q *Queue) Enqueue(payload []byte) (uint64, error) {
@@ -88,6 +96,6 @@ func (q *Queue) reserve(size int) (int, bool) {
 
 func (q *Queue) enqueue(payload []byte) uint64 {
 	q.nextID++
-	q.pending = append(q.pending, &Job{ID: q.nextID, Payload: payload})
+	q.push(Job{ID: q.nextID, payload: payload})
 	return q.nextID
 }
