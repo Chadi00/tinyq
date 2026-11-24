@@ -43,22 +43,100 @@ func BenchmarkQueueCycle(b *testing.B) {
 	}
 }
 
-func BenchmarkQueueCycleParallel128B(b *testing.B) {
-	q := queue.New()
-	payload := make([]byte, 128)
-	b.ReportAllocs()
-	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			if err := queueCycle(q, payload); err != nil {
-				b.Error(err)
-				return
+func BenchmarkQueueCycleParallel(b *testing.B) {
+	b.Run("128B", func(b *testing.B) {
+		q := queue.New()
+		payload := make([]byte, 128)
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				if err := queueCycle(q, payload); err != nil {
+					b.Error(err)
+					return
+				}
 			}
+		})
+		b.StopTimer()
+		if stats := q.Stats(); stats.Pending != 0 || stats.Leased != 0 || stats.Completed != b.N {
+			b.Fatalf("unexpected final stats: %+v", stats)
 		}
 	})
+}
+
+func BenchmarkQueueOperation(b *testing.B) {
+	for _, tc := range []struct {
+		operation string
+		payload   string
+		size      int
+	}{
+		{"Enqueue", "128B", 128},
+		{"Enqueue", "64KiB", 64 << 10},
+		{"Lease", "128B", 128},
+		{"Lease", "64KiB", 64 << 10},
+		{"Ack", "128B", 128},
+	} {
+		b.Run(tc.operation+"/"+tc.payload, func(b *testing.B) {
+			benchmarkQueueOperation(b, tc.operation, tc.size)
+		})
+	}
+}
+
+func benchmarkQueueOperation(b *testing.B, operation string, size int) {
 	b.StopTimer()
-	if stats := q.Stats(); stats.Pending != 0 || stats.Leased != 0 || stats.Completed != b.N {
-		b.Fatalf("unexpected final stats: %+v", stats)
+	b.ReportAllocs()
+	payload := make([]byte, size)
+	batchSize := min(1024, (16<<20)/size)
+	leases := make([]queue.Lease, batchSize)
+	for remaining := b.N; remaining > 0; {
+		count := min(remaining, batchSize)
+		q := queue.New()
+		if operation != "Enqueue" {
+			for range count {
+				if _, err := q.Enqueue(payload); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+		if operation == "Ack" {
+			for i := range count {
+				lease, err := q.Lease()
+				if err != nil {
+					b.Fatal(err)
+				}
+				leases[i] = lease
+			}
+		}
+
+		b.StartTimer()
+		switch operation {
+		case "Enqueue":
+			for range count {
+				if _, err := q.Enqueue(payload); err != nil {
+					b.Fatal(err)
+				}
+			}
+		case "Lease":
+			for range count {
+				if _, err := q.Lease(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		case "Ack":
+			for _, lease := range leases[:count] {
+				if err := q.Ack(lease.Job.ID, lease.Token); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+		b.StopTimer()
+		stats := q.Stats()
+		if (operation == "Enqueue" && stats.Pending != count) ||
+			(operation == "Lease" && stats.Leased != count) ||
+			(operation == "Ack" && stats.Completed != count) {
+			b.Fatalf("unexpected final stats: %+v", stats)
+		}
+		remaining -= count
 	}
 }
 
