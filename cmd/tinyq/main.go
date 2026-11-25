@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,8 +25,9 @@ func main() {
 	}
 }
 
-func run() error {
-	addr := flag.String("addr", ":8080", "Listen address")
+func run() (err error) {
+	addr := flag.String("addr", "127.0.0.1:8080", "Listen address")
+	walPath := flag.String("wal", "tinyq.wal", "Path to the persistent queue log")
 	queueMiB, ok := os.LookupEnv("TINYQ_MAX_QUEUE_MIB")
 	if !ok {
 		queueMiB = strconv.Itoa(queue.DefaultMaxMiB)
@@ -36,13 +39,18 @@ func run() error {
 		return errors.New("-max-queue-mib or TINYQ_MAX_QUEUE_MIB must be a positive MiB integer that fits in an int after conversion to bytes")
 	}
 
-	q := queue.NewWithLimit(mib << 20)
+	q, err := queue.Open(*walPath, mib<<20)
+	if err != nil {
+		return fmt.Errorf("open WAL %q: %w", *walPath, err)
+	}
+	defer func() { err = errors.Join(err, q.Close()) }()
 
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           server.New(q),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(
@@ -57,15 +65,24 @@ func run() error {
 
 	errc := make(chan error, 1)
 
-	go func() {
-		log.Printf("tinyq listening on %s", *addr)
-		errc <- srv.ListenAndServe()
-	}()
+	listener, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return err
+	}
+	log.Printf("tinyq listening on %s", listener.Addr())
+	go func() { errc <- srv.Serve(listener) }()
 
 	for {
 		select {
 		case <-ticker.C:
 			q.Expire()
+			if err := q.Compact(); err != nil {
+				if errors.Is(err, queue.ErrPersistence) {
+					srv.Close()
+					return err
+				}
+				log.Printf("WAL compaction: %v", err)
+			}
 
 		case err := <-errc:
 			if errors.Is(err, http.ErrServerClosed) {

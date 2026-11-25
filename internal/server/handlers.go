@@ -12,16 +12,19 @@ import (
 func (s *Server) enqueue(w http.ResponseWriter, r *http.Request) {
 	id, err := s.q.EnqueueFrom(r.Body, r.ContentLength)
 	var status int
-	switch err {
-	case nil:
+	switch {
+	case err == nil:
 		writeJSON(w, http.StatusCreated, struct {
 			ID uint64 `json:"id"`
 		}{id})
 		return
-	case queue.ErrFull:
+	case err == queue.ErrFull:
 		status = http.StatusServiceUnavailable
-	case queue.ErrPayloadTooLarge:
+	case err == queue.ErrPayloadTooLarge:
 		status = http.StatusRequestEntityTooLarge
+	case errors.Is(err, queue.ErrPersistence):
+		err = queue.ErrPersistence
+		status = http.StatusServiceUnavailable
 	default:
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
@@ -98,6 +101,11 @@ func (s *Server) ack(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, queue.ErrInvalidLease) ||
 		errors.Is(err, queue.ErrExpiredLease) {
 		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	if errors.Is(err, queue.ErrPersistence) {
+		http.Error(w, queue.ErrPersistence.Error(), http.StatusServiceUnavailable)
 		return
 	}
 

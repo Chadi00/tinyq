@@ -3,12 +3,19 @@ package queue
 import (
 	"sync"
 	"time"
+
+	"github.com/Chadi00/tinyq/internal/wal"
 )
 
 const DefaultMaxMiB = 64
 
 type Queue struct {
 	mu           sync.Mutex
+	walMu        sync.Mutex
+	compactRetry time.Time
+	log          *wal.Log
+	writes       []*mutation
+	flushing     bool
 	pending      []Job
 	pendingHead  int
 	pendingCount int

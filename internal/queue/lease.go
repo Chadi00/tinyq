@@ -30,6 +30,7 @@ type activeLease struct {
 	token     string
 	expiresAt time.Time
 	payload   []byte
+	acking    bool
 }
 
 func (l Lease) EncodeJSON(w io.Writer) error {
@@ -85,7 +86,7 @@ func (q *Queue) Renew(id uint64, token string) error {
 
 	lease, ok := q.leased[id]
 
-	if !ok || lease.token != token {
+	if !ok || lease.acking || lease.token != token {
 		return ErrInvalidLease
 	}
 
@@ -107,7 +108,7 @@ func (q *Queue) Ack(id uint64, token string) error {
 
 	lease, ok := q.leased[id]
 
-	if !ok || lease.token != token {
+	if !ok || lease.acking || lease.token != token {
 		return ErrInvalidLease
 	}
 
@@ -115,12 +116,20 @@ func (q *Queue) Ack(id uint64, token string) error {
 		return ErrExpiredLease
 	}
 
-	delete(q.leased, id)
-	q.payloadBytes -= len(lease.payload)
-	q.outstanding--
-	q.completed++
-
+	if q.log != nil {
+		lease.acking = true
+		q.leased[id] = lease
+		_, err := q.commit(&mutation{id: id, ack: true})
+		return err
+	}
+	q.complete(id, lease)
 	return nil
+}
+
+func (q *Queue) complete(id uint64, lease activeLease) {
+	delete(q.leased, id)
+	q.release(len(lease.payload))
+	q.completed++
 }
 
 func (q *Queue) Expire() {
@@ -128,6 +137,10 @@ func (q *Queue) Expire() {
 	defer q.mu.Unlock()
 
 	if len(q.leased) == 0 {
+		if q.outstanding == 0 && len(q.pending) > 1024 {
+			q.pending = nil
+			q.pendingHead = 0
+		}
 		return
 	}
 
@@ -138,7 +151,7 @@ func (q *Queue) Expire() {
 
 	var next time.Time
 	for id, lease := range q.leased {
-		if !now.Before(lease.expiresAt) {
+		if !lease.acking && !now.Before(lease.expiresAt) {
 			delete(q.leased, id)
 			q.push(Job{ID: id, payload: lease.payload})
 			q.leaseExpired++
