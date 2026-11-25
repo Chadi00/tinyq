@@ -240,6 +240,26 @@ func TestAgentsAutoStartResetAndResume(t *testing.T) {
 		t.Fatal("pre-reset token acknowledged the new job")
 	}
 	run("ack", id, fresh.Token)
+	req, err := http.NewRequest("POST", "http://"+addr+"/stop", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "https://example.org")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin stop: %s", res.Status)
+	}
+	run("stop")
+	run("stop")
+	listener, err = net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("stop left the server listening: %v", err)
+	}
+	listener.Close()
 	if other := take("--partition", "reader"); string(other.Job.Payload) != "keep" || other.Job.ID != 1 {
 		t.Fatalf("other partition changed: %+v", other.Job)
 	}

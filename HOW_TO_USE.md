@@ -44,6 +44,8 @@ This runs `./worker` once with the job's bytes on stdin. tinyq renews the claim 
 
 ## Scripting notes
 
+Run `tinyq stop` to gracefully stop the local server for all partitions. Unfinished jobs survive, and the next local queue command starts the server again. If the server is already stopped, `tinyq stop` succeeds without starting it.
+
 - Queue commands print one JSON value to stdout on success. Check the exit code before parsing it. Errors and worker program output go to stderr.
 - `enqueue` accepts up to 1 MiB. Use `enqueue -` for files, pipes, or multiline input. `next` returns UTF-8 payloads as text; other bytes come back with `"encoding":"base64"`.
 - The local server listens on `127.0.0.1:8080` and stops after 15 minutes without requests. Unfinished jobs survive a restart. To change the timeout, set `TINYQ_IDLE_TIMEOUT` before starting the server (`30m`, for example, or `0` to keep it running). For long claims, renew before the idle timeout as well as before expiry.

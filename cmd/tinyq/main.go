@@ -84,7 +84,26 @@ func serve(args []string) (err error) {
 	}
 	defer func() { err = errors.Join(err, q.Close()) }()
 
-	activity := &activityHandler{handler: q, last: time.Now()}
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	defer stop()
+
+	listenerClosed := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.Handle("/", q)
+	mux.Handle("POST /stop", http.NewCrossOriginProtection().Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !loopbackAddress(r.RemoteAddr) || !loopbackAddress(r.Host) {
+			http.Error(w, "stop requires a local connection", http.StatusForbidden)
+			return
+		}
+		stop()
+		<-listenerClosed // The next queue command can now start a fresh server.
+		w.WriteHeader(http.StatusNoContent)
+	})))
+	activity := &activityHandler{handler: mux, last: time.Now()}
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           activity,
@@ -92,13 +111,7 @@ func serve(args []string) (err error) {
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(
-		context.Background(),
-		os.Interrupt,
-		syscall.SIGTERM,
-	)
-	defer stop()
+	srv.RegisterOnShutdown(func() { close(listenerClosed) })
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()

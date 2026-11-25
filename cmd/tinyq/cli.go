@@ -18,6 +18,7 @@ import (
 const usage = `Usage:
   tinyq [--partition NAME] COMMAND
   tinyq serve [flags]      Start the server in the foreground
+  tinyq stop               Gracefully stop the local server for all partitions
   tinyq enqueue PAYLOAD    Enqueue one argument as bytes; use - to read stdin
   tinyq next [--ttl 5m] [--receipt PATH]  Claim a job and print its payload and receipt
   tinyq done RECEIPT       Complete this claim after saving the result
@@ -79,12 +80,21 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return json.NewEncoder(stdout).Encode(map[string]bool{"ok": true})
 	}
 
-	if !server.ValidPartition(name) {
-		return errors.New("invalid partition: use 1–64 lowercase letters, digits, hyphens or underscores; start with a letter or digit")
-	}
 	url := strings.TrimRight(os.Getenv("TINYQ_URL"), "/")
 	if url == "" {
 		url = "http://127.0.0.1:8080"
+	}
+	if command == "stop" {
+		if len(args) != 0 {
+			return errors.New("usage: tinyq stop")
+		}
+		if err := stopLocalServer(url); err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(map[string]bool{"ok": true})
+	}
+	if !server.ValidPartition(name) {
+		return errors.New("invalid partition: use 1–64 lowercase letters, digits, hyphens or underscores; start with a letter or digit")
 	}
 	c := queueClient(url, name)
 	var result any

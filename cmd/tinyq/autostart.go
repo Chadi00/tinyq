@@ -20,15 +20,14 @@ func queueClient(endpoint, partition string) *client.Client {
 	if partition != "default" {
 		base += "/partitions/" + partition
 	}
-	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "http" || u.Path != "" || u.Port() == "" ||
-		(u.Hostname() != "localhost" && !net.ParseIP(u.Hostname()).IsLoopback()) {
+	localAddr := localAddress(endpoint)
+	if localAddr == "" {
 		return client.New(base)
 	}
 	dialer := &net.Dialer{}
 	transport := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		conn, err := dialer.DialContext(ctx, network, addr)
-		if addr != u.Host || !errors.Is(err, syscall.ECONNREFUSED) {
+		if addr != localAddr || !errors.Is(err, syscall.ECONNREFUSED) {
 			return conn, err
 		}
 		if err := startLocalServer(addr); err != nil {
@@ -51,6 +50,40 @@ func queueClient(endpoint, partition string) *client.Client {
 		}
 	}}
 	return client.NewWithHTTPClient(base, &http.Client{Transport: transport, Timeout: 10 * time.Second})
+}
+
+func localAddress(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "http" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Port() == "" || !loopbackAddress(u.Host) {
+		return ""
+	}
+	return u.Host
+}
+
+func loopbackAddress(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	return err == nil && (host == "localhost" || net.ParseIP(host).IsLoopback())
+}
+
+func stopLocalServer(endpoint string) error {
+	if localAddress(endpoint) == "" {
+		return errors.New("tinyq stop requires a local HTTP URL with a port")
+	}
+	c := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	res, err := c.Post(endpoint+"/stop", "", nil)
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("tinyq stop: %s", res.Status)
+	}
+	return nil
 }
 
 func startLocalServer(addr string) error {
