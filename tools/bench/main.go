@@ -33,16 +33,16 @@ func main() {
 
 func run() error {
 	flag.Usage = func() {
-		fmt.Fprintln(flag.CommandLine.Output(), "tinyq bench — measure a durable queue over HTTP\n\nUsage: bench [options]\n  bench -suite full\n  bench -url http://127.0.0.1:8081 -suite cycles -workers 4\n\nOptions:")
+		fmt.Fprintln(flag.CommandLine.Output(), "tinyq bench — measure a durable queue over HTTP and the CLI\n\nUsage: bench [options]\n  bench -suite full\n  bench -url http://127.0.0.1:8081 -suite cycles -workers 4\n\nOptions:")
 		flag.PrintDefaults()
 	}
-	server := flag.String("server", "./bin/tinyq", "Server executable for disposable queues")
+	server := flag.String("server", "./bin/tinyq", "tinyq executable for disposable servers and CLI workloads")
 	url := flag.String("url", "", "Use a dedicated, empty running queue instead")
-	suite := flag.String("suite", "quick", "quick (API, cycles, local WAL), full (also expiry), api, cycles, storage, or expiry")
-	n := flag.Int("n", 200, "Samples per workload (1–1000000; large payloads and backlog are capped)")
+	suite := flag.String("suite", "quick", "quick (API, CLI, cycles, local WAL), full (also expiry), api, cli, cycles, storage, or expiry")
+	n := flag.Int("n", 200, "Samples per workload (1–1000000; CLI capped at 64, large payloads and backlog also capped)")
 	workers := flag.Int("workers", 8, "Concurrent clients in parallel workloads (1–64)")
 	flag.Parse()
-	if flag.NArg() != 0 || !slices.Contains([]string{"quick", "full", "api", "cycles", "storage", "expiry"}, *suite) {
+	if flag.NArg() != 0 || !slices.Contains([]string{"quick", "full", "api", "cli", "cycles", "storage", "expiry"}, *suite) {
 		return errors.New("unknown workload or argument; use -h for usage")
 	}
 	if *n < 1 || *n > 1_000_000 || *workers < 1 || *workers > 64 {
@@ -90,7 +90,14 @@ func run() error {
 		}
 		b.completed = stats.Completed
 		if standard || *suite == "api" {
-			if err := b.api(ctx); err != nil {
+			b.heading("HTTP operations  /  FIFO backlog")
+			if err := b.operations(ctx, b.c, b.n); err != nil {
+				return err
+			}
+		}
+		if standard || *suite == "cli" {
+			b.heading("CLI operations  /  one process per command")
+			if err := b.operations(ctx, cliClient{*server, *url}, min(b.n, 64)); err != nil {
 				return err
 			}
 		}

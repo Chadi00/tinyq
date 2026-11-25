@@ -20,20 +20,27 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatal(err)
+	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil && !errors.Is(err, flag.ErrHelp) {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
-func run() (err error) {
-	addr := flag.String("addr", "127.0.0.1:8080", "Listen address")
-	walPath := flag.String("wal", "tinyq.wal", "Path to the persistent queue log")
+func serve(args []string) (err error) {
+	flags := flag.NewFlagSet("tinyq serve", flag.ContinueOnError)
+	addr := flags.String("addr", "127.0.0.1:8080", "Listen address")
+	walPath := flags.String("wal", "tinyq.wal", "Path to the persistent queue log")
 	queueMiB, ok := os.LookupEnv("TINYQ_MAX_QUEUE_MIB")
 	if !ok {
 		queueMiB = strconv.Itoa(queue.DefaultMaxMiB)
 	}
-	maxQueueMiB := flag.String("max-queue-mib", queueMiB, "Maximum unfinished payload and upload reservations in MiB (env: TINYQ_MAX_QUEUE_MIB)")
-	flag.Parse()
+	maxQueueMiB := flags.String("max-queue-mib", queueMiB, "Maximum unfinished payload and upload reservations in MiB (env: TINYQ_MAX_QUEUE_MIB)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected server argument: %q", flags.Arg(0))
+	}
 	mib, err := strconv.Atoi(*maxQueueMiB)
 	if err != nil || mib <= 0 || mib > math.MaxInt>>20 {
 		return errors.New("-max-queue-mib or TINYQ_MAX_QUEUE_MIB must be a positive MiB integer that fits in an int after conversion to bytes")

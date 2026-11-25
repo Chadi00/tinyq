@@ -17,7 +17,15 @@ func payload(size int) []byte {
 	return data
 }
 
-func take(ctx context.Context, c *client.Client, data []byte) (client.Lease, error) {
+type queueClient interface {
+	Enqueue(context.Context, []byte) (uint64, error)
+	Lease(context.Context) (client.Lease, error)
+	Renew(context.Context, uint64, string) error
+	Ack(context.Context, uint64, string) error
+	Stats(context.Context) (client.Stats, error)
+}
+
+func take(ctx context.Context, c queueClient, data []byte) (client.Lease, error) {
 	l, err := c.Lease(ctx)
 	if err == nil && !bytes.Equal(l.Job.Payload, data) {
 		err = errors.New("unexpected leased payload; job was not acknowledged")
@@ -25,9 +33,8 @@ func take(ctx context.Context, c *client.Client, data []byte) (client.Lease, err
 	return l, err
 }
 
-func (b *benchmark) api(ctx context.Context) error {
-	b.heading("HTTP operations  /  FIFO backlog")
-	n := min(b.n, 256)
+func (b *benchmark) operations(ctx context.Context, c queueClient, samples int) error {
+	n := min(samples, 256)
 	ids := make([]uint64, n)
 	leases := make([]client.Lease, n)
 	data := payload(128)
@@ -37,12 +44,12 @@ func (b *benchmark) api(ctx context.Context) error {
 		op   func(context.Context, int) error
 	}{
 		{"Enqueue · 128 B", n, func(ctx context.Context, i int) error {
-			id, err := b.c.Enqueue(ctx, data)
+			id, err := c.Enqueue(ctx, data)
 			ids[i] = id
 			return err
 		}},
 		{"Lease from backlog", n, func(ctx context.Context, i int) error {
-			l, err := take(ctx, b.c, data)
+			l, err := take(ctx, c, data)
 			if err == nil && l.Job.ID != ids[i] {
 				return fmt.Errorf("FIFO: got job %d, want %d", l.Job.ID, ids[i])
 			}
@@ -50,17 +57,20 @@ func (b *benchmark) api(ctx context.Context) error {
 			return err
 		}},
 		{"Renew lease", n, func(ctx context.Context, i int) error {
-			return b.c.Renew(ctx, ids[i], leases[i].Token)
+			return c.Renew(ctx, ids[i], leases[i].Token)
 		}},
 		{"Ack", n, func(ctx context.Context, i int) error {
-			return b.c.Ack(ctx, ids[i], leases[i].Token)
+			return c.Ack(ctx, ids[i], leases[i].Token)
 		}},
-		{"Stats", b.n, func(ctx context.Context, _ int) error {
-			_, err := b.c.Stats(ctx)
+		{"Stats", samples, func(ctx context.Context, _ int) error {
+			stats, err := c.Stats(ctx)
+			if err == nil && (stats.Pending != 0 || stats.Leased != 0 || stats.Completed != b.completed+n) {
+				return fmt.Errorf("unexpected stats: %+v", stats)
+			}
 			return err
 		}},
-		{"Poll empty queue", b.n, func(ctx context.Context, _ int) error {
-			_, err := b.c.Lease(ctx)
+		{"Poll empty queue", samples, func(ctx context.Context, _ int) error {
+			_, err := c.Lease(ctx)
 			if errors.Is(err, client.ErrEmptyQueue) {
 				return nil
 			}
