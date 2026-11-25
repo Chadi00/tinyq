@@ -18,7 +18,7 @@ type cliClient struct {
 
 func (c cliClient) run(ctx context.Context, input []byte, result any, args ...string) error {
 	cmd := exec.CommandContext(ctx, c.binary, args...)
-	cmd.Env = append(os.Environ(), "TINYQ_URL="+c.url)
+	cmd.Env = append(os.Environ(), "TINYQ_URL="+c.url, "TINYQ_PARTITION=default")
 	if input != nil {
 		cmd.Stdin = bytes.NewReader(input)
 	}

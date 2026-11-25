@@ -15,9 +15,10 @@ const (
 )
 
 var (
-	ErrEmptyQueue   = errors.New("queue is empty")
-	ErrInvalidLease = errors.New("invalid lease")
-	ErrExpiredLease = errors.New("lease has expired")
+	ErrEmptyQueue    = errors.New("queue is empty")
+	ErrInvalidLease  = errors.New("invalid lease")
+	ErrExpiredLease  = errors.New("lease has expired")
+	ErrLeaseDuration = errors.New("lease duration must be between 1s and 24h")
 )
 
 type Lease struct {
@@ -27,6 +28,7 @@ type Lease struct {
 }
 
 type activeLease struct {
+	duration  time.Duration
 	token     string
 	expiresAt time.Time
 	payload   []byte
@@ -50,6 +52,13 @@ func (l Lease) EncodeJSON(w io.Writer) error {
 }
 
 func (q *Queue) Lease() (Lease, error) {
+	return q.LeaseFor(leaseTTL)
+}
+
+func (q *Queue) LeaseFor(duration time.Duration) (Lease, error) {
+	if duration < time.Second || duration > 24*time.Hour {
+		return Lease{}, ErrLeaseDuration
+	}
 	q.mu.Lock()
 
 	if q.pendingCount == 0 {
@@ -67,11 +76,12 @@ func (q *Queue) Lease() (Lease, error) {
 	job := q.pop()
 	lease := activeLease{
 		token:     hex.EncodeToString(token),
-		expiresAt: time.Now().Add(leaseTTL),
+		duration:  duration,
+		expiresAt: time.Now().Add(duration),
 		payload:   job.payload,
 	}
 
-	if len(q.leased) == 0 {
+	if len(q.leased) == 0 || lease.expiresAt.Before(q.nextExpiry) {
 		q.nextExpiry = lease.expiresAt
 	}
 	q.leased[job.ID] = lease
@@ -96,13 +106,15 @@ func (q *Queue) Renew(id uint64, token string) error {
 		return ErrExpiredLease
 	}
 
-	lease.expiresAt = now.Add(leaseTTL)
+	lease.expiresAt = now.Add(lease.duration)
 	q.leased[id] = lease
 
 	return nil
 }
 
 func (q *Queue) Ack(id uint64, token string) error {
+	q.mutations.RLock()
+	defer q.mutations.RUnlock()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 

@@ -11,24 +11,44 @@ import (
 	"strings"
 
 	"github.com/Chadi00/tinyq/client"
+	"github.com/Chadi00/tinyq/internal/server"
 	"github.com/Chadi00/tinyq/internal/wal"
 )
 
 const usage = `Usage:
-  tinyq serve [flags]      Start the local server (also the default with no command)
+  tinyq [--partition NAME] COMMAND
+  tinyq serve [flags]      Start the server in the foreground
   tinyq enqueue PAYLOAD    Enqueue one argument as bytes; use - to read stdin
+  tinyq next [--ttl 5m] [--receipt PATH]  Claim a job and print its payload and receipt
+  tinyq done RECEIPT       Complete this claim after saving the result
+  tinyq renew RECEIPT      Extend this claim by its original duration
+  tinyq work -- CMD [ARG...]  Feed one job to CMD on stdin; renew and ack on success
   tinyq lease              Claim a job, or return null if the queue is empty
-  tinyq renew ID TOKEN     Extend a lease by 30 seconds from now
+  tinyq renew ID TOKEN     Extend a lease by its original duration
   tinyq ack ID TOKEN       Mark a leased job complete
   tinyq stats              Show queue counts
+  tinyq empty              Discard all jobs and reset this partition
 
 Queue commands print one JSON value on success. Errors go to stderr and exit nonzero.
-Set TINYQ_URL to override http://127.0.0.1:8080. For server flags: tinyq serve -h.
+TINYQ_PARTITION selects the queue (default: default). --partition overrides it.
+Local queue commands start the server if needed. Set TINYQ_URL to override
+http://127.0.0.1:8080. For server flags: tinyq serve -h.
 `
 
 func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return serve(nil)
+		_, err := io.WriteString(stdout, usage)
+		return err
+	}
+	name := os.Getenv("TINYQ_PARTITION")
+	if name == "" {
+		name = "default"
+	}
+	if args[0] == "--partition" || args[0] == "-p" {
+		if len(args) < 3 {
+			return errors.New("usage: tinyq --partition NAME COMMAND")
+		}
+		name, args = args[1], args[2:]
 	}
 	command, args := args[0], args[1:]
 	switch command {
@@ -45,16 +65,38 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		_, err := io.WriteString(stdout, usage)
 		return err
 	}
+	ctx := context.Background()
+	if command == "done" || command == "renew" && (len(args) == 1 || len(args) == 2 && args[0] == "--receipt") {
+		if len(args) > 0 && args[0] == "--receipt" {
+			args = args[1:]
+		}
+		if len(args) != 1 {
+			return fmt.Errorf("usage: tinyq %s RECEIPT", command)
+		}
+		if err := useReceipt(ctx, command, args[0]); err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(map[string]bool{"ok": true})
+	}
 
-	url := os.Getenv("TINYQ_URL")
+	if !server.ValidPartition(name) {
+		return errors.New("invalid partition: use 1–64 lowercase letters, digits, hyphens or underscores; start with a letter or digit")
+	}
+	url := strings.TrimRight(os.Getenv("TINYQ_URL"), "/")
 	if url == "" {
 		url = "http://127.0.0.1:8080"
 	}
-	c := client.New(url)
-	ctx := context.Background()
+	c := queueClient(url, name)
 	var result any
 	var err error
 	switch command {
+	case "next":
+		result, err = next(ctx, c, url, name, args)
+	case "work":
+		if len(args) < 2 || args[0] != "--" {
+			return errors.New("usage: tinyq work -- CMD [ARG...]")
+		}
+		result, err = work(ctx, c, args[1:])
 	case "enqueue":
 		if len(args) != 1 {
 			return errors.New("usage: tinyq enqueue PAYLOAD (use - for stdin)")
@@ -72,11 +114,14 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		var id uint64
 		id, err = c.Enqueue(ctx, payload)
 		result = map[string]uint64{"id": id}
-	case "lease", "stats":
+	case "lease", "stats", "empty":
 		if len(args) != 0 {
 			return fmt.Errorf("usage: tinyq %s", command)
 		}
-		if command == "stats" {
+		if command == "empty" {
+			err = c.Empty(ctx)
+			result = map[string]bool{"ok": true}
+		} else if command == "stats" {
 			result, err = c.Stats(ctx)
 		} else {
 			result, err = c.Lease(ctx)

@@ -35,6 +35,8 @@ func (q *Queue) Enqueue(payload []byte) (uint64, error) {
 	if len(payload) > maxJobBytes {
 		return 0, ErrPayloadTooLarge
 	}
+	q.mutations.RLock()
+	defer q.mutations.RUnlock()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if _, ok := q.reserve(len(payload)); !ok {
@@ -48,6 +50,8 @@ func (q *Queue) EnqueueFrom(r io.Reader, contentLength int64) (uint64, error) {
 		return 0, ErrPayloadTooLarge
 	}
 
+	q.mutations.RLock()
+	defer q.mutations.RUnlock()
 	q.mu.Lock()
 	limit, ok := q.reserve(int(contentLength))
 	q.mu.Unlock()

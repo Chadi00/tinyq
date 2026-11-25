@@ -22,7 +22,7 @@ type process struct {
 
 func start(ctx context.Context, server, wal string, args ...string) (*process, error) {
 	ctx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(ctx, server, append([]string{"-addr", "127.0.0.1:0", "-wal", wal}, args...)...)
+	cmd := exec.CommandContext(ctx, server, append([]string{"-addr", "127.0.0.1:0", "-wal", wal, "-idle-timeout", "0"}, args...)...)
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = 5 * time.Second
 	stderr, err := cmd.StderrPipe()

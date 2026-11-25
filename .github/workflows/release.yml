@@ -1,0 +1,30 @@
+name: Release CLI
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go test -race ./...
+      - name: Build macOS and Linux archives
+        run: |
+          mkdir dist
+          for target in 'darwin amd64 Darwin x86_64' 'darwin arm64 Darwin arm64' 'linux amd64 Linux x86_64' 'linux arm64 Linux aarch64'; do
+            read -r os arch system machine <<< "$target"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o dist/tinyq ./cmd/tinyq
+            tar -czf "dist/tinyq-$system-$machine.tar.gz" -C dist tinyq
+          done
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" install.sh dist/*.tar.gz --verify-tag --generate-notes

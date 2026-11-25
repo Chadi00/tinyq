@@ -10,6 +10,7 @@ import (
 const DefaultMaxMiB = 64
 
 type Queue struct {
+	mutations    sync.RWMutex
 	mu           sync.Mutex
 	walMu        sync.Mutex
 	compactRetry time.Time

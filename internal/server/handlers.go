@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/Chadi00/tinyq/internal/queue"
 )
@@ -34,7 +35,22 @@ func (s *Server) enqueue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) lease(w http.ResponseWriter, r *http.Request) {
-	lease, err := s.q.Lease()
+	var lease queue.Lease
+	var err error
+	if values := r.URL.Query(); values.Has("ttl") {
+		duration, parseErr := time.ParseDuration(values.Get("ttl"))
+		if parseErr != nil {
+			http.Error(w, queue.ErrLeaseDuration.Error(), http.StatusBadRequest)
+			return
+		}
+		lease, err = s.q.LeaseFor(duration)
+	} else {
+		lease, err = s.q.Lease()
+	}
+	if errors.Is(err, queue.ErrLeaseDuration) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if errors.Is(err, queue.ErrEmptyQueue) {
 		w.WriteHeader(http.StatusNoContent)

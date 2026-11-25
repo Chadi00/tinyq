@@ -6,7 +6,7 @@ import (
 	"github.com/Chadi00/tinyq/internal/queue"
 )
 
-type Server struct{
+type Server struct {
 	q *queue.Queue
 }
 
@@ -19,6 +19,13 @@ func New(q *queue.Queue) http.Handler {
 	mux.HandleFunc("POST /renew", s.renew)
 	mux.HandleFunc("POST /ack", s.ack)
 	mux.HandleFunc("GET /stats", s.stats)
+	mux.HandleFunc("POST /empty", func(w http.ResponseWriter, r *http.Request) {
+		if err := q.Empty(); err != nil {
+			http.Error(w, queue.ErrPersistence.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 
-	return mux
+	return http.NewCrossOriginProtection().Handler(mux)
 }

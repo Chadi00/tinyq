@@ -40,11 +40,13 @@ type Stats struct {
 }
 
 func New(baseURL string) *Client {
+	return NewWithHTTPClient(baseURL, &http.Client{Timeout: 10 * time.Second})
+}
+
+func NewWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		http: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		http:    httpClient,
 	}
 }
 
@@ -61,9 +63,17 @@ func (c *Client) Enqueue(ctx context.Context, payload []byte) (uint64, error) {
 }
 
 func (c *Client) Lease(ctx context.Context) (Lease, error) {
+	return c.lease(ctx, "/lease")
+}
+
+func (c *Client) LeaseFor(ctx context.Context, duration time.Duration) (Lease, error) {
+	return c.lease(ctx, "/lease?ttl="+duration.String())
+}
+
+func (c *Client) lease(ctx context.Context, path string) (Lease, error) {
 	var lease Lease
 
-	err := c.request(ctx, "POST", "/lease",
+	err := c.request(ctx, "POST", path,
 		nil, "", http.StatusOK, &lease)
 
 	return lease, err
@@ -97,6 +107,10 @@ func (c *Client) Ack(ctx context.Context, id uint64, token string) error {
 	return c.request(ctx, "POST", "/ack",
 		body, "application/json",
 		http.StatusNoContent, nil)
+}
+
+func (c *Client) Empty(ctx context.Context) error {
+	return c.request(ctx, "POST", "/empty", nil, "", http.StatusNoContent, nil)
 }
 
 func (c *Client) Stats(ctx context.Context) (Stats, error) {
@@ -133,16 +147,21 @@ func (c *Client) request(
 	}
 	defer res.Body.Close()
 
-	if path == "/lease" && res.StatusCode == http.StatusNoContent {
+	resource, _, _ := strings.Cut(path, "?")
+	if resource == "/lease" && res.StatusCode == http.StatusNoContent {
 		return ErrEmptyQueue
 	}
 
 	if res.StatusCode != expectedStatus {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 1024))
+		if detail := strings.TrimSpace(string(body)); detail != "" {
+			return fmt.Errorf("tinyq: %s: %s", res.Status, detail)
+		}
 		return fmt.Errorf("tinyq: %s", res.Status)
 	}
 
 	if result != nil {
-		if path == "/lease" {
+		if resource == "/lease" {
 			if hint := res.Header.Get("X-Tinyq-Payload-Size"); hint != "" {
 				return decodeLease(res.Body, hint, result)
 			}

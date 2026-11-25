@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,7 +31,12 @@ func main() {
 func serve(args []string) (err error) {
 	flags := flag.NewFlagSet("tinyq serve", flag.ContinueOnError)
 	addr := flags.String("addr", "127.0.0.1:8080", "Listen address")
-	walPath := flags.String("wal", "tinyq.wal", "Path to the persistent queue log")
+	walPath := flags.String("wal", os.Getenv("TINYQ_WAL"), "Queue log (env: TINYQ_WAL; default: ~/.local/share/tinyq/tinyq.wal)")
+	idleDefault := os.Getenv("TINYQ_IDLE_TIMEOUT")
+	if idleDefault == "" {
+		idleDefault = "15m"
+	}
+	idle := flags.String("idle-timeout", idleDefault, "Stop after this long without requests; 0 disables (env: TINYQ_IDLE_TIMEOUT)")
 	queueMiB, ok := os.LookupEnv("TINYQ_MAX_QUEUE_MIB")
 	if !ok {
 		queueMiB = strconv.Itoa(queue.DefaultMaxMiB)
@@ -46,15 +53,41 @@ func serve(args []string) (err error) {
 		return errors.New("-max-queue-mib or TINYQ_MAX_QUEUE_MIB must be a positive MiB integer that fits in an int after conversion to bytes")
 	}
 
-	q, err := queue.Open(*walPath, mib<<20)
+	timeout, err := time.ParseDuration(*idle)
+	if err != nil || timeout < 0 {
+		return errors.New("idle timeout must be a nonnegative duration, e.g. 15m")
+	}
+	if *walPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		dir := filepath.Join(home, ".local", "share", "tinyq")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+		*walPath = filepath.Join(dir, "tinyq.wal")
+	}
+	listener, err := net.Listen("tcp", *addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	q, err := server.Open(*walPath, mib<<20)
+	// The previous server can release its listener just before it releases its WAL.
+	for deadline := time.Now().Add(5 * time.Second); errors.Is(err, syscall.EWOULDBLOCK) && time.Now().Before(deadline); {
+		time.Sleep(25 * time.Millisecond)
+		q, err = server.Open(*walPath, mib<<20)
+	}
 	if err != nil {
 		return fmt.Errorf("open WAL %q: %w", *walPath, err)
 	}
 	defer func() { err = errors.Join(err, q.Close()) }()
 
+	activity := &activityHandler{handler: q, last: time.Now()}
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           server.New(q),
+		Handler:           activity,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -69,21 +102,29 @@ func serve(args []string) (err error) {
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	var idleTimer *time.Timer
+	var idleC <-chan time.Time
+	if timeout > 0 {
+		idleTimer = time.NewTimer(timeout)
+		defer idleTimer.Stop()
+		idleC = idleTimer.C
+	}
 
 	errc := make(chan error, 1)
 
-	listener, err := net.Listen("tcp", *addr)
-	if err != nil {
-		return err
-	}
 	log.Printf("tinyq listening on %s", listener.Addr())
 	go func() { errc <- srv.Serve(listener) }()
 
 	for {
 		select {
+		case <-idleC:
+			if remaining := activity.remaining(timeout); remaining > 0 {
+				idleTimer.Reset(remaining)
+			} else {
+				stop()
+			}
 		case <-ticker.C:
-			q.Expire()
-			if err := q.Compact(); err != nil {
+			if err := q.Maintain(); err != nil {
 				if errors.Is(err, queue.ErrPersistence) {
 					srv.Close()
 					return err
@@ -106,4 +147,33 @@ func serve(args []string) (err error) {
 			return srv.Shutdown(ctx)
 		}
 	}
+}
+
+type activityHandler struct {
+	handler http.Handler
+	mu      sync.Mutex
+	active  int
+	last    time.Time
+}
+
+func (a *activityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	a.active++
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.active--
+		a.last = time.Now()
+		a.mu.Unlock()
+	}()
+	a.handler.ServeHTTP(w, r)
+}
+
+func (a *activityHandler) remaining(timeout time.Duration) time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active > 0 {
+		return timeout
+	}
+	return timeout - time.Since(a.last)
 }

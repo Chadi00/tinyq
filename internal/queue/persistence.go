@@ -65,6 +65,27 @@ func (q *Queue) Compact() error {
 	return err
 }
 
+func (q *Queue) Empty() error {
+	q.mutations.Lock()
+	defer q.mutations.Unlock()
+	q.walMu.Lock()
+	defer q.walMu.Unlock()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.log != nil {
+		if err := q.log.Compact(wal.State{}); err != nil {
+			return errors.Join(ErrPersistence, err)
+		}
+	}
+	q.pending = nil
+	q.pendingHead, q.pendingCount = 0, 0
+	q.leased = make(map[uint64]activeLease)
+	q.outstanding, q.payloadBytes = 0, 0
+	q.nextID, q.completed, q.leaseExpired = 0, 0, 0
+	q.nextExpiry, q.compactRetry = time.Time{}, time.Time{}
+	return nil
+}
+
 func (q *Queue) Close() error {
 	q.walMu.Lock()
 	defer q.walMu.Unlock()
